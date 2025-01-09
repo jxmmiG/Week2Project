@@ -168,3 +168,126 @@ resource "azurerm_lb_outbound_rule" "outbound" {
     name = "OutboundFIP"
   }
 }
+
+
+#main in the module
+resource "azurerm_resource_group" "ots_rg" {
+  name     = "${var.environment}-${var.product}-rg01"
+  location = "UK South"
+}
+
+data "azurerm_virtual_network" "vnet" {
+  name                = var.virtualNetworkName
+  resource_group_name = var.vnet_rg_name
+}
+
+data "azurerm_subnet" "subnet" {
+  name                 = var.subnetName
+  virtual_network_name = data.azurerm_virtual_network.vnet.name
+  resource_group_name  = data.azurerm_virtual_network.vnet.resource_group_name
+}
+
+resource "tls_private_key" "keypair" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+data "azurerm_key_vault" "kv1" {
+  name                        = var.kv_name
+  resource_group_name         = var.kv_rg_name
+#  depends_on = [local_file.key_pem]
+}
+
+resource "azurerm_key_vault_secret" "privatekey" {
+  name         = "${var.virtualMachineName}-private-key"
+  value        = tls_private_key.keypair.private_key_pem
+  key_vault_id = data.azurerm_key_vault.kv1.id
+}
+
+resource "azurerm_key_vault_secret" "publickey" {
+  name = "${var.virtualMachineName}-public-key"
+  value = tls_private_key.keypair.public_key_pem
+  key_vault_id = data.azurerm_key_vault.kv1.id
+}
+
+# # Retrieve the SSH public key from the key vault
+# data "azurerm_key_vault_secret" "ssh_public_key" {
+#   name         = var.ssh_public_key_name
+#   key_vault_id = data.azurerm_key_vault.kv1.id
+# }
+
+
+resource "azurerm_network_interface" "nic" {
+  name                = "${var.virtualMachineName}-nic"
+  location            = var.location
+  resource_group_name = azurerm_resource_group.ots_rg.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = data.azurerm_subnet.subnet.id
+    private_ip_address_allocation = "Dynamic"
+  }
+}
+
+resource "azurerm_linux_virtual_machine" "main" {
+  name                  = var.virtualMachineName
+  location              = data.azurerm_resource_group.ots_rg.location
+  resource_group_name   = data.azurerm_resource_group.ots_rg.name
+  network_interface_ids = [azurerm_network_interface.nic.id]
+  size                  = var.virtualMachineSize
+#   availability_set_id   = data.azurerm_availability_set.main.id
+  disable_password_authentication = "true"
+  admin_username = var.admin_username
+  admin_ssh_key {
+    username   = var.admin_username
+    public_key = tls_private_key.keypair.public_key_pem
+  }
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+    disk_size_gb         = var.osDiskSize
+  }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "ubuntu-24_04-lts"
+    sku       = "server"
+    version   = "latest"
+  }
+
+  boot_diagnostics {
+    storage_account_uri = var.boot_diagnostics_storage_account_uri
+  }
+
+#   tags = local.tags
+#   user_data = var.user_data
+
+}
+
+
+
+
+#main in root folder
+
+#OTS_VM
+data "azurerm_key_vault" "ssh_kv" {
+  name = "iuks-ssh-kv01"
+  resource_group_name = "iuks-infra-rg01"
+}
+
+module "ots_vm" {
+  source = "./modules/ots_vm"
+  environment = var.environment
+  product = var.product_ots
+  location = var.location
+  virtualNetworkName = data.azurerm_virtual_network.main_vnet.name
+  vnet_rg_name = data.azurerm_virtual_network.main_vnet.resource_group_name
+  subnetName = var.subnetName_backend
+  virtualMachineName = "${var.environment}${var.product_ots}01"
+  virtualMachineSize = "Standard_B2als_v2"
+  admin_username = var.admin_username
+  osDiskSize = 256
+  boot_diagnostics_storage_account_uri = azurerm_storage_account.elis_sa01.primary_blob_endpoint
+  kv_name = data.azurerm_key_vault.ssh_kv.name
+  kv_rg_name = data.azurerm_key_vault.ssh_kv.resource_group_name
+}
